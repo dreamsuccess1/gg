@@ -48,39 +48,65 @@ logger = logging.getLogger(__name__)
 def parse_checkmark_question(text: str):
     """
     Question text parse karta hai jisme kisi option mein ✅ laga ho.
+
+    Supported formats:
+      - (A) text ✅  /  A. text ✅  /  A) text ✅
+      - 1. text ✅  /  1) text ✅
+      - plain text ✅  (bina prefix ke)
+
     Returns: (question_str, options_list, correct_index)  ya  None
     """
     if "✅" not in text:
         return None
+
     lines = [l.strip() for l in text.strip().splitlines() if l.strip()]
     if len(lines) < 3:
         return None
-    # Find which line has ✅
+
+    # Matches: (A) / A. / A) / 1. / 1) etc.
+    OPT_PREFIX = re.compile(r"^(?:[(]?[A-Ea-e1-4][).]\s*|[A-Ea-e1-4]\.\s*)")
+
+    def is_option_line(line: str) -> bool:
+        return bool(OPT_PREFIX.match(line)) or "✅" in line
+
+    def clean_option(line: str) -> str:
+        line = OPT_PREFIX.sub("", line).strip()
+        line = line.replace("✅", "").strip()
+        return line
+
+    # ✅ wali line ka index
     ck_idx = next((i for i, l in enumerate(lines) if "✅" in l), None)
     if ck_idx is None:
         return None
-    # Try 4-option, 3-option, 2-option windows
-    for opt_count in [4, 3, 2]:
-        opt_start = len(lines) - opt_count
-        if opt_start < 1:
-            continue
-        if ck_idx < opt_start:
-            continue  # ✅ line is not inside this options window
-        question = " ".join(lines[:opt_start]).strip()
-        raw_opts = lines[opt_start:]
-        correct_idx = None
-        clean_opts  = []
-        for i, opt in enumerate(raw_opts):
-            if "✅" in opt:
-                correct_idx = i
-                opt = opt.replace("✅", "").strip()
-            # Remove leading (A) / A. / A) etc.
-            opt = re.sub(r"^[(]?[A-Ea-e][).]\s*", "", opt).strip()
-            clean_opts.append(opt)
-        if correct_idx is None or not question:
-            continue
-        return question, clean_opts, correct_idx
-    return None
+
+    # ✅ line ke upar aur neeche consecutive option lines collect karo
+    opt_start = ck_idx
+    opt_end   = ck_idx
+
+    while opt_start > 0 and is_option_line(lines[opt_start - 1]):
+        opt_start -= 1
+    while opt_end < len(lines) - 1 and is_option_line(lines[opt_end + 1]):
+        opt_end += 1
+
+    opt_lines = lines[opt_start:opt_end + 1]
+    if len(opt_lines) < 2:
+        return None
+
+    question = " ".join(lines[:opt_start]).strip()
+    if not question:
+        return None
+
+    correct_idx = None
+    clean_opts  = []
+    for i, opt in enumerate(opt_lines):
+        if "✅" in opt:
+            correct_idx = i
+        clean_opts.append(clean_option(opt))
+
+    if correct_idx is None:
+        return None
+
+    return question, clean_opts, correct_idx
 
 # ── Shared: build set-selector keyboard ──────────────────────────────────────
 
@@ -623,6 +649,12 @@ async def handle_aq_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """✅ wala text — sirf aq_mode mein ya always for admin."""
     if not is_admin(update.effective_user.id):
         return
+    # ── Guard: agar user /newquiz conversation mein hai to yahan kuch mat karo ──
+    # Conversation states ke keys check karo user_data mein
+    conv_keys = {"question", "options", "correct", "explanation", "timer",
+                 "waiting_newset", "photo_id"}
+    if any(k in ctx.user_data for k in conv_keys):
+        return
     # If waiting for set name after choosing "new set"
     if ctx.user_data.get("aq_waiting_setname"):
         name   = update.message.text.strip()
@@ -806,8 +838,11 @@ async def _do_save_fwd(msg, ctx, set_id: int):
         await msg.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
 async def cancel_conv(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("❌ रद्द।")
     ctx.user_data.clear()
+    await update.message.reply_text(
+        "❌ *रद्द कर दिया गया।*\n\nकुछ और करना हो तो /start करें।",
+        parse_mode=ParseMode.MARKDOWN
+    )
     return ConversationHandler.END
 
 # ── Poll Forwarding — moved above (handle_forwarded_poll_new) ──────────────────
@@ -1225,24 +1260,27 @@ def build_app():
     )
 
     # Conversations
+    _cancel_handler = CommandHandler("cancel", cancel_conv)
     manual_conv = ConversationHandler(
         entry_points=[CommandHandler("newquiz", newquiz_start)],
         states={
-            MANUAL_QUESTION   : [MessageHandler(filters.TEXT | filters.PHOTO, recv_question)],
-            MANUAL_OPTION_A   : [MessageHandler(filters.TEXT, recv_option_a)],
-            MANUAL_OPTION_B   : [MessageHandler(filters.TEXT, recv_option_b)],
-            MANUAL_OPTION_C   : [MessageHandler(filters.TEXT, recv_option_c)],
-            MANUAL_OPTION_D   : [MessageHandler(filters.TEXT, recv_option_d)],
-            MANUAL_CORRECT    : [CallbackQueryHandler(recv_correct, pattern=r"^correct_")],
-            MANUAL_EXPLANATION: [MessageHandler(filters.TEXT, recv_explanation)],
-            MANUAL_TIMER      : [CallbackQueryHandler(recv_timer, pattern=r"^timer_")],
+            MANUAL_QUESTION   : [_cancel_handler, MessageHandler(filters.TEXT & ~filters.COMMAND | filters.PHOTO, recv_question)],
+            MANUAL_OPTION_A   : [_cancel_handler, MessageHandler(filters.TEXT & ~filters.COMMAND, recv_option_a)],
+            MANUAL_OPTION_B   : [_cancel_handler, MessageHandler(filters.TEXT & ~filters.COMMAND, recv_option_b)],
+            MANUAL_OPTION_C   : [_cancel_handler, MessageHandler(filters.TEXT & ~filters.COMMAND, recv_option_c)],
+            MANUAL_OPTION_D   : [_cancel_handler, MessageHandler(filters.TEXT & ~filters.COMMAND, recv_option_d)],
+            MANUAL_CORRECT    : [_cancel_handler, CallbackQueryHandler(recv_correct, pattern=r"^correct_")],
+            MANUAL_EXPLANATION: [_cancel_handler, MessageHandler(filters.TEXT & ~filters.COMMAND, recv_explanation)],
+            MANUAL_TIMER      : [_cancel_handler, CallbackQueryHandler(recv_timer, pattern=r"^timer_")],
             SET_NAME          : [
-                MessageHandler(filters.TEXT, recv_set_name),
+                _cancel_handler,
+                MessageHandler(filters.TEXT & ~filters.COMMAND, recv_set_name),
                 CallbackQueryHandler(recv_set_choice, pattern=r"^(addtoset_|newset$)"),
             ],
         },
-        fallbacks=[CommandHandler("cancel", cancel_conv)],
+        fallbacks=[_cancel_handler],
         per_chat=False,
+        allow_reentry=True,
     )
 
     broadcast_conv = ConversationHandler(
