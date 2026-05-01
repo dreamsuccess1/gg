@@ -751,7 +751,6 @@ async def addquestion_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
 
 async def addquestion_done(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    # Pending question pehle save karo
     if ctx.user_data.get("aq_q") and ctx.user_data.get("aq_preset_set"):
         await _do_save_aq(update.message, ctx, ctx.user_data["aq_preset_set"])
     if any(ctx.user_data.get(k) for k in (
@@ -763,7 +762,7 @@ async def addquestion_done(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Koi active mode nahi.")
 
 async def handle_aq_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """✅ wala text process karo — per-user lock ke saath."""
+    """✅ wala text — per-user lock ke saath process karo."""
     if not is_admin(update.effective_user.id):
         return
     uid = update.effective_user.id
@@ -773,12 +772,21 @@ async def handle_aq_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await _handle_aq_inner(update, ctx)
 
 async def _handle_aq_inner(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    # /newquiz conversation mein hai toh ignore karo
-    conv_keys = {"question", "options", "correct", "explanation", "timer", "waiting_newset", "photo_id"}
+    # ── Guard: agar user /newquiz conversation mein hai to yahan kuch mat karo ──
+    conv_keys = {"question", "options", "correct", "explanation", "timer",
+                 "waiting_newset", "photo_id"}
     if any(k in ctx.user_data for k in conv_keys):
         return
 
-    # Set name wait states
+    aq_active = (
+        ctx.user_data.get("aq_mode") or
+        ctx.user_data.get("aq_preset_set") or
+        ctx.user_data.get("aq_waiting_setname") or
+        ctx.user_data.get("aq_waiting_presetname") or
+        ctx.user_data.get("aq_waiting_fwdsetname")
+    )
+
+    # If waiting for new set name at /addquestion start
     if ctx.user_data.get("aq_waiting_presetname"):
         name   = update.message.text.strip()
         set_id = db.create_set(name, owner_id=update.effective_user.id)
@@ -786,11 +794,12 @@ async def _handle_aq_inner(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ctx.user_data["aq_preset_set"] = set_id
         await update.message.reply_text(
             f"\u2705 Set *{name}* ban gaya!\n\n"
-            f"\U0001f4cc Ab question bhejein jisme sahi option pe *\u2705* laga ho.\n"
+            f"\U0001f4cc *Ab question bhejein* jisme sahi option ke aage *\u2705* laga ho:\n\n"
             f"_/done \u2014 khatam karein_",
             parse_mode=ParseMode.MARKDOWN
         )
         return
+    # If waiting for set name after choosing "new set" (per-question)
     if ctx.user_data.get("aq_waiting_setname"):
         name   = update.message.text.strip()
         set_id = db.create_set(name, owner_id=update.effective_user.id)
@@ -804,58 +813,60 @@ async def _handle_aq_inner(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ctx.user_data.pop("aq_waiting_fwdsetname", None)
         await _do_save_fwd(update.message, ctx, set_id)
         return
-
-    # ✅ detect karo
+    # aq_mode active nahi toh kuch mat karo
+    if not aq_active:
+        return
     text = update.message.text or update.message.caption or ""
-    text = _normalize_checkmark(text)
+    text = _normalize_checkmark(text)   # ✅️ → ✅ (unicode-safe)
     if "\u2705" not in text:
         return
-
     parsed = parse_checkmark_question(text)
     if not parsed:
-        aq_active = ctx.user_data.get("aq_mode") or ctx.user_data.get("aq_preset_set")
+        # Sirf aq_mode mein error dikhao, warna silently return
         if aq_active:
             await update.message.reply_text(
-                "\u26a0\ufe0f Format detect nahi hua.\n"
-                "Question alag line mein aur sahi option pe \u2705 laga hona chahiye.\n\n"
-                "Example:\n`sawaal?\nOption A\nOption B\u2705\nOption C\nOption D`"
+                "⚠️ Format detect नहीं हुआ।\n"
+                "Question alag line mein aur sahi option pe ✅ laga hona chahiye।\n\n"
+                "Example:\n`सवाल?\nOption A\nOption B✅\nOption C\nOption D`"
             )
         return
-
     question, options, correct_idx = parsed
+    labels = ["A","B","C","D","E"]
+    opts_preview = "\n".join(
+        f"{'✅' if i==correct_idx else '➖'} {labels[i] if i<len(labels) else i+1}: {o}"
+        for i, o in enumerate(options)
+    )
     ctx.user_data["aq_q"]       = question
     ctx.user_data["aq_opts"]    = options
     ctx.user_data["aq_correct"] = correct_idx
     ctx.user_data["aq_photo"]   = None
 
+    # Agar preset set already choose hua hai (/addquestion flow) → seedha save
     preset_set = ctx.user_data.get("aq_preset_set")
     if preset_set:
-        # Preset set hai — seedha save karo
         await _do_save_aq(update.message, ctx, preset_set)
         return
 
-    # Preset set nahi hai — set choose karne ka option do
+    # Warna per-question set selector dikhaao
     sets = db.get_all_sets()
     if sets:
         kb = _set_selector_kb("aqset")
-        labels = ["A","B","C","D","E"]
-        opts_preview = "\n".join(
-            f"{'\u2705' if i==correct_idx else '\u2796'} {labels[i] if i<len(labels) else i+1}: {o}"
-            for i, o in enumerate(options)
-        )
         await update.message.reply_text(
-            f"\u2705 *Question detect hua!*\n\n"
-            f"\u2753 {question}\n\n"
+            f"✅ *Question detect हुआ!*\n\n"
+            f"❓ {question}\n\n"
             f"{opts_preview}\n\n"
-            f"\U0001f4c2 *Kis Set mein save karein?*",
+            f"📂 *किस Set में save करें?*",
             reply_markup=kb,
             parse_mode=ParseMode.MARKDOWN
         )
     else:
         ctx.user_data["aq_waiting_setname"] = True
         await update.message.reply_text(
-            "\u2705 Question detect hua!\n\n"
-            "\U0001f4dd Naye Set ka naam type karein:"
+            f"✅ *Question detect हुआ!*\n\n"
+            f"❓ {question}\n\n"
+            f"{opts_preview}\n\n"
+            f"📝 नए Set का नाम टाइप करें:",
+            parse_mode=ParseMode.MARKDOWN
         )
 
 async def aqpreset_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -952,6 +963,8 @@ async def handle_forwarded_poll_new(update: Update, ctx: ContextTypes.DEFAULT_TY
     msg  = update.message
     poll = msg.poll
     if not poll:
+        # Poll nahi hai — text forwarded hai, ✅ check karo
+        await _handle_aq_inner(update, ctx)
         return
     if poll.type != Poll.QUIZ:
         await msg.reply_text("⚠️ Sirf Quiz polls forward karein।")
@@ -1659,7 +1672,7 @@ def build_app():
     # ✅ Text handler for /addquestion mode (set-name input + ✅ detection)
     # Must be AFTER ConversationHandlers so they take priority
     app.add_handler(MessageHandler(
-        filters.TEXT & ~filters.COMMAND & ~filters.FORWARDED,
+        filters.TEXT & ~filters.COMMAND,
         handle_aq_text
     ))
 
