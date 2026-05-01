@@ -176,6 +176,10 @@ def _set_selector_kb(prefix: str) -> InlineKeyboardMarkup:
 # ── Global Poll Registry ─────────────────────────────────────────────────────
 POLL_TO_CHAT: dict = {}
 
+# Per-user lock: ek user ke messages ek-ek karke process honge
+import asyncio as _asyncio
+_AQ_LOCKS: dict = {}
+
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 def is_admin(uid: int) -> bool:
@@ -558,19 +562,7 @@ async def shuffle_set_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_admin(query.from_user.id):
         return
     set_id = int(query.data.split("_")[1])
-    import random
-    qs = db.get_questions(set_id)
-    random.shuffle(qs)
-    # Recreate questions in shuffled order
-    db._conn().execute("DELETE FROM questions WHERE set_id=?", (set_id,))
-    db._conn().commit()
-    for q in qs:
-        db.add_question(
-            set_id=set_id, question=q["question"],
-            options=q["options"], correct=q["correct"],
-            explanation=q.get("explanation",""),
-            timer=q.get("timer",20), photo_id=q.get("photo_id")
-        )
+    db.shuffle_set(set_id)
     await query.message.edit_text("✅ Set shuffle हो गया!")
 
 async def rename_set_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -761,6 +753,11 @@ async def addquestion_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
 
 async def addquestion_done(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    # Agar koi pending question pada hai toh pehle save karo
+    pending_q      = ctx.user_data.get("aq_q")
+    pending_set    = ctx.user_data.get("aq_preset_set")
+    if pending_q and pending_set:
+        await _do_save_aq(update.message, ctx, pending_set)
     if any(ctx.user_data.get(k) for k in (
         "aq_mode","aq_preset_set","aq_waiting_setname","aq_waiting_presetname","aq_waiting_fwdsetname"
     )):
@@ -773,6 +770,14 @@ async def handle_aq_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """✅ wala text — sirf aq_mode active hone par hi kaam karo."""
     if not is_admin(update.effective_user.id):
         return
+    uid = update.effective_user.id
+    if uid not in _AQ_LOCKS:
+        _AQ_LOCKS[uid] = _asyncio.Lock()
+    async with _AQ_LOCKS[uid]:
+        await _handle_aq_inner(update, ctx)
+
+async def _handle_aq_inner(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Actual handler — per-user lock ke andar chalta hai."""
     # ── Guard: agar user /newquiz conversation mein hai to yahan kuch mat karo ──
     conv_keys = {"question", "options", "correct", "explanation", "timer",
                  "waiting_newset", "photo_id"}
@@ -817,7 +822,9 @@ async def handle_aq_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ctx.user_data.pop("aq_waiting_fwdsetname", None)
         await _do_save_fwd(update.message, ctx, set_id)
         return
-    # FIX #5: Always check ✅ for admin — aq_mode ke bina bhi
+    # ✅ sirf tab process karo jab aq_mode active ho
+    if not aq_active:
+        return
     text = update.message.text or update.message.caption or ""
     text = _normalize_checkmark(text)   # ✅️ → ✅ (unicode-safe)
     if "\u2705" not in text:
@@ -1673,8 +1680,7 @@ def build_app():
     # Must be AFTER ConversationHandlers so they take priority
     app.add_handler(MessageHandler(
         filters.TEXT & ~filters.COMMAND & ~filters.FORWARDED,
-        handle_aq_text,
-        block=False
+        handle_aq_text
     ))
 
     return app
