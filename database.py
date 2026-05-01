@@ -21,7 +21,7 @@ def _conn() -> sqlite3.Connection:
         _local.conn.row_factory = sqlite3.Row
         _local.conn.execute("PRAGMA journal_mode=WAL")
         _local.conn.execute("PRAGMA synchronous=NORMAL")
-        _local.conn.execute("PRAGMA foreign_keys=ON")   # ← CASCADE kaam kare
+        _local.conn.execute("PRAGMA foreign_keys=ON")
     return _local.conn
 
 
@@ -199,7 +199,7 @@ def delete_set(set_id: int):
     c.commit()
 
 def shuffle_set(set_id: int):
-    """Shuffle questions in a set — safe approach, no direct ID manipulation."""
+    """Shuffle questions in a set — safe delete+reinsert approach."""
     import random
     c = _conn()
     rows = c.execute(
@@ -213,7 +213,6 @@ def shuffle_set(set_id: int):
         d["options"] = json.loads(d["options"])
         qs.append(d)
     random.shuffle(qs)
-    # Delete existing and re-insert in shuffled order
     c.execute("DELETE FROM questions WHERE set_id=?", (set_id,))
     c.commit()
     for q in qs:
