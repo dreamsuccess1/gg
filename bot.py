@@ -2220,6 +2220,7 @@ def build_app():
         },
         fallbacks=[_cancel_handler],
         per_chat=False,
+        per_message=False,
         allow_reentry=True,
     )
 
@@ -2228,6 +2229,7 @@ def build_app():
         states={BROADCAST_MSG: [MessageHandler(filters.TEXT, broadcast_send)]},
         fallbacks=[CommandHandler("cancel", cancel_conv)],
         per_chat=False,
+        per_message=False,
     )
 
     schedule_conv = ConversationHandler(
@@ -2238,6 +2240,7 @@ def build_app():
         },
         fallbacks=[CommandHandler("cancel", cancel_conv)],
         per_chat=False,
+        per_message=False,
     )
 
     rename_conv = ConversationHandler(
@@ -2245,6 +2248,7 @@ def build_app():
         states={RENAME_SET: [MessageHandler(filters.TEXT, rename_set_done)]},
         fallbacks=[CommandHandler("cancel", cancel_conv)],
         per_chat=False,
+        per_message=False,
     )
 
     settimer_conv = ConversationHandler(
@@ -2252,6 +2256,7 @@ def build_app():
         states={SET_TIMER_VAL: [CallbackQueryHandler(settimer_done, pattern=r"^timer_")]},
         fallbacks=[CommandHandler("cancel", cancel_conv)],
         per_chat=False,
+        per_message=False,
     )
 
     # Handlers
@@ -2283,6 +2288,7 @@ def build_app():
         },
         fallbacks=[CommandHandler("cancel", cancel_conv)],
         per_chat=False,
+        per_message=False,
     )
     topic_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(addtopic_callback, pattern=r"^addtopic_")],
@@ -2291,6 +2297,7 @@ def build_app():
         },
         fallbacks=[CommandHandler("cancel", cancel_conv)],
         per_chat=False,
+        per_message=False,
     )
 
     app.add_handler(manual_conv)
