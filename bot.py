@@ -559,6 +559,8 @@ async def sets_addq_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def manage_set_chosen(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    if not is_admin(query.from_user.id):
+        return
     try:
         set_id = int(query.data.split("_")[1])
     except (IndexError, ValueError):
@@ -984,9 +986,16 @@ async def _handle_aq_inner(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ctx.user_data.pop("aq_waiting_fwdsetname", None)
         await _do_save_fwd(update.message, ctx, set_id)
         return
-    # FIXED: Q: format bhi detect karo (bina ✅ ke)
-    text = update.message.text or update.message.caption or ""
+    # Text extract — forwarded message mein text ya caption
+    text = ""
+    if update.message.text:
+        text = update.message.text
+    elif update.message.caption:
+        text = update.message.caption
     text = _normalize_checkmark(text)
+
+    if not text.strip():
+        return
 
     # Check Q: A: B: C: D: Ans: format
     has_q_format = bool(
@@ -1041,9 +1050,7 @@ async def _handle_aq_inner(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 )
             return
 
-    # aq_mode active nahi toh ✅ format bhi check karo
-    if not aq_active:
-        return
+    # ✅ wala message hamesha check karo (forwarded ho ya direct)
     if "\u2705" not in text:
         return
     parsed = parse_checkmark_question(text)
@@ -2333,7 +2340,7 @@ def build_app():
     app.add_handler(CommandHandler("setsection", setsection_cmd))
     app.add_handler(CommandHandler("slb",        sectional_leaderboard_cmd))
     app.add_handler(CallbackQueryHandler(lb_back_callback,   pattern=r"^lb_back$"))
-    app.add_handler(CallbackQueryHandler(leaderboard_show,    pattern=r"^lb_"))
+    app.add_handler(CallbackQueryHandler(leaderboard_show,    pattern=r"^lb_subj_|^lb_topic_|^lb_overall"))
     app.add_handler(CallbackQueryHandler(new_subject_callback,pattern=r"^newsubject"))
     app.add_handler(CallbackQueryHandler(addtopic_callback,   pattern=r"^addtopic_"))
     app.add_handler(CallbackQueryHandler(del_subject_callback,pattern=r"^delsubj_"))
@@ -2354,6 +2361,23 @@ def build_app():
         filters.TEXT & ~filters.COMMAND,
         handle_aq_text
     ))
+
+    # ── Global error handler ──────────────────────────────────────────────────
+    async def global_error_handler(update, context):
+        import traceback
+        err = context.error
+        logger.error(f"Update {update} caused error: {err}")
+        logger.error(traceback.format_exc())
+        # Agar callback query hai toh answer karo (button spinning band karo)
+        if update and hasattr(update, "callback_query") and update.callback_query:
+            try:
+                await update.callback_query.answer(
+                    "❌ Kuch galat hua. Dobara try karein.", show_alert=True
+                )
+            except Exception:
+                pass
+
+    app.add_error_handler(global_error_handler)
 
     return app
 
