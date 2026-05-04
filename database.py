@@ -20,7 +20,6 @@ def _conn() -> sqlite3.Connection:
         _local.conn.row_factory = sqlite3.Row
         _local.conn.execute("PRAGMA journal_mode=WAL")
         _local.conn.execute("PRAGMA synchronous=NORMAL")
-        _local.conn.execute("PRAGMA foreign_keys=ON")
     return _local.conn
 
 
@@ -289,27 +288,19 @@ def update_set_section(set_id: int, subject_id: int = None, topic_id: int = None
 
 def shuffle_set(set_id: int):
     import random
-    c = _conn()
-    rows = c.execute("SELECT * FROM questions WHERE set_id=? ORDER BY id", (set_id,)).fetchall()
-    if not rows:
-        return
-    qs = []
-    for r in rows:
-        d = dict(r)
-        d["options"] = json.loads(d["options"])
-        qs.append(d)
-    random.shuffle(qs)
-    c.execute("DELETE FROM questions WHERE set_id=?", (set_id,))
+    c   = _conn()
+    rows = c.execute("SELECT id FROM questions WHERE set_id=?", (set_id,)).fetchall()
+    ids  = [r["id"] for r in rows]
+    random.shuffle(ids)
+    for new_pos, qid in enumerate(ids):
+        c.execute("UPDATE questions SET id=? WHERE id=?", (new_pos+90000, qid))
     c.commit()
-    for q in qs:
-        c.execute(
-            "INSERT INTO questions(set_id,question,options,correct,explanation,timer,photo_id)"
-            " VALUES(?,?,?,?,?,?,?)",
-            (set_id, q["question"],
-             json.dumps(q["options"], ensure_ascii=False),
-             q["correct"], q.get("explanation",""),
-             q.get("timer",20), q.get("photo_id"))
-        )
+    rows2 = c.execute(
+        "SELECT id FROM questions WHERE set_id=? ORDER BY id", (set_id,)
+    ).fetchall()
+    for new_pos, r in enumerate(rows2):
+        c.execute("UPDATE questions SET id=? WHERE id=?",
+                  (new_pos+set_id*1000+1, r["id"]))
     c.commit()
 
 
@@ -431,6 +422,21 @@ def reset_leaderboard(chat_id: int, section_tag: str = None):
     else:
         c.execute("DELETE FROM leaderboard WHERE chat_id=?", (chat_id,))
     c.commit()
+
+def get_global_leaderboard(limit: int = 20) -> list:
+    """Sabhi chats ka combined leaderboard — DM mein use karo."""
+    rows = _conn().execute("""
+        SELECT name,
+               SUM(score)   AS score,
+               SUM(correct) AS correct,
+               SUM(wrong)   AS wrong,
+               SUM(quizzes) AS quizzes
+        FROM leaderboard
+        GROUP BY user_id
+        ORDER BY score DESC, wrong ASC
+        LIMIT ?
+    """, (limit,)).fetchall()
+    return [dict(r) for r in rows]
 
 def get_user_global_rank(user_id: int) -> Optional[dict]:
     c   = _conn()
