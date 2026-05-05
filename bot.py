@@ -50,6 +50,19 @@ logger = logging.getLogger(__name__)
 # ── ✅ Auto-detect helper — parse ✅-marked question text ─────────────────────
 
 
+async def _safe_edit(msg, text, **kwargs):
+    """edit_text ka safe wrapper — 'Message not modified' error ignore karo."""
+    try:
+        await msg.edit_text(text, **kwargs)
+    except Exception as e:
+        err_str = str(e).lower()
+        if "not modified" not in err_str and "message to edit not found" not in err_str:
+            logger.error(f"edit_text failed: {e}")
+            try:
+                await msg.reply_text(text, **kwargs)
+            except Exception:
+                pass
+
 def _normalize_checkmark(text: str) -> str:
     """✅️ (U+2705 + U+FE0F variation selector) ko ✅ (U+2705) mein normalize karo."""
     return text.replace("\u2705\uFE0F", "\u2705")
@@ -304,36 +317,19 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     "Bot ko DM mein /start karein — phir group mein answers register honge।"
                 )
         else:
-            # DM mein student — register karo + sets dikhao (solo practice option)
-            db.register_user(user.id, user.full_name, user.username)
-            sets = db.get_all_sets()
-            if sets:
-                btns = [[InlineKeyboardButton(
-                    f"🎯 {s['name']} ({s['count']} सवाल)",
-                    callback_data=f"userquiz_{s['id']}"
-                )] for s in sets]
-                await update.message.reply_text(
-                    f"🎯 *{BOT_NAME} mein swagat hai, {user.first_name}!*\n\n"
-                    "✅ *Register ho gaye!*\n\n"
-                    "📌 *2 tarike quiz khelne ke:*\n"
-                    "1️⃣ *Solo Practice* — Neeche set chunein, DM mein quiz lo, PDF milegi\n"
-                    "2️⃣ *Group Quiz* — Apne group mein jaayein, admin ki quiz mein participate karein\n\n"
-                    "📚 *Abhi practice karein:*",
-                    reply_markup=InlineKeyboardMarkup(btns),
-                    parse_mode=ParseMode.MARKDOWN
-                )
-            else:
-                await update.message.reply_text(
-                    f"🎯 *{BOT_NAME} mein swagat hai, {user.first_name}!*\n\n"
-                    "✅ *Register ho gaye!*\n\n"
-                    "📌 *Quiz kaise khelen:*\n"
-                    "1️⃣ Apne Group mein jaayein\n"
-                    "2️⃣ Admin jab quiz start kare — poll mein jawab dein\n"
-                    "3️⃣ Quiz khatam hone par PDF yahan (DM) milegi 📄\n\n"
-                    "📊 /myrank — Apni rank dekhein\n"
-                    "🏆 /leaderboard — Top students",
-                    parse_mode=ParseMode.MARKDOWN
-                )
+            # FIXED: DM mein student → sirf register confirm karo
+            # Quiz group mein hoti hai — DM mein PDF aata hai
+            await update.message.reply_text(
+                f"🎯 *{BOT_NAME} mein swagat hai, {user.first_name}!*\n\n"
+                "✅ *Aap register ho gaye!*\n\n"
+                "📌 *Quiz kaise khelen:*\n"
+                "1️⃣ Apne Group mein jaayein\n"
+                "2️⃣ Admin jab quiz start kare — poll mein jawab dein\n"
+                "3️⃣ Quiz khatam hone par PDF yahan (DM) milegi 📄\n\n"
+                "📊 /myrank — Apni rank dekhein\n"
+                "🏆 /leaderboard — Top students",
+                parse_mode=ParseMode.MARKDOWN
+            )
 
 async def help_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await start(update, ctx)
@@ -536,6 +532,46 @@ async def delete_schedule_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     db.delete_schedule(sched_id)
     await query.message.edit_text("✅ Schedule cancel हो गया।")
 
+# ── /newset ───────────────────────────────────────────────────────────────────
+
+async def newset_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Seedha khali set banao — naam type karo aur set ready."""
+    if not is_admin(update.effective_user.id):
+        return
+    ctx.user_data["waiting_newset_name"] = True
+    await update.message.reply_text(
+        "📂 *Naye Set ka naam type karein:*\n\n"
+        "_/cancel — cancel karein_",
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+async def newset_name_received(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Newset ka naam receive karo aur set banao."""
+    if not ctx.user_data.get("waiting_newset_name"):
+        return
+    name = update.message.text.strip()
+    if not name:
+        await update.message.reply_text("❌ Naam empty nahi ho sakta.")
+        return
+    ctx.user_data.pop("waiting_newset_name", None)
+    set_id = db.create_set(name, owner_id=update.effective_user.id)
+    # Set banane ke baad turant questions add karne ka option do
+    btns = InlineKeyboardMarkup([[
+        InlineKeyboardButton("➕ Questions Add karo", callback_data=f"mgaddq_{set_id}"),
+        InlineKeyboardButton("✅ Done", callback_data=f"newset_done_{set_id}"),
+    ]])
+    await update.message.reply_text(
+        f"✅ Set *{name}* ban gaya!\n\n"
+        f"Ab questions add karna chahte ho?",
+        reply_markup=btns,
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+async def newset_done_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await _safe_edit(query.message, "✅ Set ready hai! /sets se dekh sakte hain.")
+
 # ── /manageset ───────────────────────────────────────────────────────────────
 
 async def manage_set_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -551,6 +587,19 @@ async def manage_set_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         parse_mode=ParseMode.MARKDOWN
     )
 
+async def sets_newset_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """/sets se 'Naya Set Banao' button."""
+    query = update.callback_query
+    await query.answer()
+    if not is_admin(query.from_user.id):
+        return
+    ctx.user_data["waiting_newset_name"] = True
+    await _safe_edit(
+        query.message,
+        "📂 *Naye Set ka naam type karein:*\n\n_/cancel — cancel karein_",
+        parse_mode=ParseMode.MARKDOWN
+    )
+
 async def sets_addq_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """'/sets' se 'Questions Add' button → /addquestion jaisi flow start karo."""
     query = update.callback_query
@@ -559,7 +608,12 @@ async def sets_addq_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     ctx.user_data.clear()
     ctx.user_data["aq_mode"] = True
-    sets = db.get_all_sets()
+    try:
+        sets = db.get_all_sets()
+    except Exception as e:
+        logger.error(f"addquestion get_all_sets error: {e}")
+        await update.message.reply_text("❌ DB error. Bot restart karein.")
+        return
     if sets:
         kb = _set_selector_kb("aqpreset")
         await query.message.edit_text(
@@ -576,6 +630,8 @@ async def sets_addq_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def manage_set_chosen(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    if not is_admin(query.from_user.id):
+        return
     try:
         set_id = int(query.data.split("_")[1])
     except (IndexError, ValueError):
@@ -636,9 +692,18 @@ async def rename_set_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     if not is_admin(query.from_user.id):
         return
-    set_id = int(query.data.split("_")[1])
+    try:
+        set_id = int(query.data.split("_")[1])
+    except (IndexError, ValueError):
+        await query.message.edit_text("❌ Invalid set.")
+        return ConversationHandler.END
+    set_info = db.get_set(set_id)
     ctx.user_data["rename_set_id"] = set_id
-    await query.message.reply_text("नया नाम टाइप करें:")
+    name = set_info['name'] if set_info else ''
+    await query.message.reply_text(
+        f"\u270f\ufe0f *{name}* ka naya naam type karein:\n/cancel \u2014 cancel",
+        parse_mode=ParseMode.MARKDOWN
+    )
     return RENAME_SET
 
 async def rename_set_done(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -655,10 +720,14 @@ async def settimer_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     if not is_admin(query.from_user.id):
         return
-    set_id = int(query.data.split("_")[1])
+    try:
+        set_id = int(query.data.split("_")[1])
+    except (IndexError, ValueError):
+        await query.message.edit_text("❌ Invalid set.")
+        return ConversationHandler.END
     ctx.user_data["timer_set_id"] = set_id
     await query.message.reply_text(
-        "नया timer चुनें (पूरे set के लिए):",
+        "⏱ Naya timer chunein (poore set ke liye):",
         reply_markup=timer_kb()
     )
     return SET_TIMER_VAL
@@ -679,9 +748,35 @@ async def delete_set_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     if not is_admin(query.from_user.id):
         return
-    set_id = int(query.data.split("_")[1])
+    try:
+        set_id = int(query.data.split("_")[1])
+    except (IndexError, ValueError):
+        await _safe_edit(query.message, "❌ Invalid set.")
+        return
+    # Confirm button dikhao
+    confirm_kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Haan, delete karo", callback_data=f"delset_confirm_{set_id}"),
+        InlineKeyboardButton("❌ Cancel", callback_data=f"mgset_{set_id}"),
+    ]])
+    await _safe_edit(
+        query.message,
+        "\u26a0\ufe0f *Kya aap sure hain?*\nIs set ke saare questions delete ho jayenge!",
+        reply_markup=confirm_kb,
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+async def delete_set_confirm_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if not is_admin(query.from_user.id):
+        return
+    try:
+        set_id = int(query.data.split("_")[2])
+    except (IndexError, ValueError):
+        await _safe_edit(query.message, "❌ Invalid.")
+        return
     db.delete_set(set_id)
-    await query.message.edit_text("✅ Set delete हो गया।")
+    await _safe_edit(query.message, "✅ Set delete ho gaya.")
 
 # ── Manual Question Creation ─────────────────────────────────────────────────
 
@@ -803,7 +898,12 @@ async def addquestion_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data.clear()
     ctx.user_data["aq_mode"] = True
 
-    sets = db.get_all_sets()
+    try:
+        sets = db.get_all_sets()
+    except Exception as e:
+        logger.error(f"addquestion get_all_sets error: {e}")
+        await update.message.reply_text("❌ DB error. Bot restart karein.")
+        return
     if sets:
         kb = _set_selector_kb("aqpreset")
         await update.message.reply_text(
@@ -962,7 +1062,7 @@ async def handle_aq_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def _handle_aq_inner(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # ── Guard: agar user /newquiz conversation mein hai to yahan kuch mat karo ──
     conv_keys = {"question", "options", "correct", "explanation", "timer",
-                 "waiting_newset", "photo_id"}
+                 "waiting_newset", "photo_id", "rename_set_id", "timer_set_id"}
     if any(k in ctx.user_data for k in conv_keys):
         return
 
@@ -973,6 +1073,11 @@ async def _handle_aq_inner(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ctx.user_data.get("aq_waiting_presetname") or
         ctx.user_data.get("aq_waiting_fwdsetname")
     )
+
+    # /newset naam wait
+    if ctx.user_data.get("waiting_newset_name"):
+        await newset_name_received(update, ctx)
+        return
 
     # If waiting for new set name at /addquestion start
     if ctx.user_data.get("aq_waiting_presetname"):
@@ -1001,9 +1106,16 @@ async def _handle_aq_inner(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ctx.user_data.pop("aq_waiting_fwdsetname", None)
         await _do_save_fwd(update.message, ctx, set_id)
         return
-    # FIXED: Q: format bhi detect karo (bina ✅ ke)
-    text = update.message.text or update.message.caption or ""
+    # Text extract — forwarded message mein text ya caption
+    text = ""
+    if update.message.text:
+        text = update.message.text
+    elif update.message.caption:
+        text = update.message.caption
     text = _normalize_checkmark(text)
+
+    if not text.strip():
+        return
 
     # Check Q: A: B: C: D: Ans: format
     has_q_format = bool(
@@ -1058,9 +1170,7 @@ async def _handle_aq_inner(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 )
             return
 
-    # aq_mode active nahi toh ✅ format bhi check karo
-    if not aq_active:
-        return
+    # ✅ wala message hamesha check karo (forwarded ho ya direct)
     if "\u2705" not in text:
         return
     parsed = parse_checkmark_question(text)
@@ -1426,7 +1536,12 @@ async def handle_excel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # ── Quiz Engine ───────────────────────────────────────────────────────────────
 
 async def list_sets(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    sets = db.get_all_sets()
+    try:
+        sets = db.get_all_sets()
+    except Exception as e:
+        logger.error(f"get_all_sets error: {e}")
+        await update.message.reply_text("❌ DB error. Bot restart karein.")
+        return
     chat = update.effective_chat
     is_group = chat.type in ("group", "supergroup")
 
@@ -1458,25 +1573,19 @@ async def list_sets(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     InlineKeyboardButton("⚙️ Manage", callback_data=f"mgset_{s['id']}"),
                 ])
             btns.append([InlineKeyboardButton("➕ Questions Add karo", callback_data="sets_addq")])
+            btns.append([InlineKeyboardButton("🆕 Naya Set Banao", callback_data="sets_newset")])
             await update.message.reply_text(
                 "📚 *Saare Quiz Sets:*",
                 reply_markup=InlineKeyboardMarkup(btns),
                 parse_mode=ParseMode.MARKDOWN
             )
     else:
-        is_dm = chat.type == "private"
         btns = [[InlineKeyboardButton(
-            f"{'🎯' if is_dm else '▶️'} {s['name']}  ({s['count']} सवाल)",
+            f"▶️ {s['name']}  ({s['count']} सवाल)",
             callback_data=f"userquiz_{s['id']}"
         )] for s in sets]
-        msg = (
-            "📚 *Quiz Sets — Chunein aur Practice karein:*\n\n"
-            "_Solo quiz — PDF milegi!_"
-            if is_dm else
-            "📚 *Quiz Sets — Admin ki quiz mein participate karein:*"
-        )
         await update.message.reply_text(
-            msg,
+            "📚 *Quiz Sets — chunein aur shuru karein:*",
             reply_markup=InlineKeyboardMarkup(btns),
             parse_mode=ParseMode.MARKDOWN
         )
@@ -1488,129 +1597,27 @@ async def startquiz_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await list_sets(update, ctx)
 
 async def userquiz_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """
-    Student DM mein set choose kare → DM mein solo quiz chale.
-    Group mein button dabaye → group ki admin quiz mein participate karne ka option.
-    """
+    """User set chunke quiz shuru kare — DM ya group dono mein."""
     query = update.callback_query
     await query.answer()
-    user    = query.from_user
-    chat    = query.message.chat
-    chat_id = chat.id
-
+    user = query.from_user
     if db.is_banned(user.id):
-        await query.message.edit_text("❌ Aap banned hain।")
+        await query.message.edit_text("❌ Aap banned hain.")
         return
-
     try:
         set_id = int(query.data.split("_")[1])
     except (IndexError, ValueError):
-        await query.message.edit_text("❌ Invalid। /start dobara karein।")
+        await query.message.edit_text("❌ Invalid set.")
         return
-
-    # Agar group mein — students participate karein group quiz mein
-    if chat.type in ("group", "supergroup"):
-        existing = ctx.chat_data.get("quiz")
-        if existing and existing.get("active") and not existing.get("finished"):
-            await query.message.answer(
-                "✅ *Register ho gaye!*\n\nAb group ki quiz mein answers dein। 🎯",
-                parse_mode=ParseMode.MARKDOWN
-            )
-        else:
-            await query.message.edit_text(
-                "✅ *Register ho gaye!*\n\nAbhi group mein koi quiz nahi chal rahi।\n"
-                "Admin ke quiz start karne ka intezaar karein। ⏳",
-                parse_mode=ParseMode.MARKDOWN
-            )
-        return
-
-    # ── DM mein: solo quiz chalo ─────────────────────────────────────
+    chat_id   = query.message.chat_id
     questions = db.get_questions(set_id)
     if not questions:
         await query.message.edit_text("❌ Is set mein koi sawaal nahi hai।")
         return
-
     existing = ctx.chat_data.get("quiz")
     if existing and existing.get("active") and not existing.get("finished"):
-        await query.message.edit_text(
-            "⚠️ Pehle se ek quiz chal rahi hai!\n"
-            "Uske khatam hone ka intezaar karein।"
-        )
+        await query.message.edit_text("⚠️ Is chat mein pehle se quiz chal rahi hai!")
         return
-
-    set_info = db.get_set(set_id)
-    now_str  = datetime.now().strftime("%d %b %Y, %I:%M %p IST")
-    quiz = {
-        "questions"      : questions,
-        "scores"         : {
-            user.id: {
-                "name": user.full_name, "score": 0,
-                "correct": 0, "wrong": 0,
-                "time": 0.0, "answered": 0
-            }
-        },
-        "active"         : True,
-        "finished"       : False,
-        "poll_map"       : {},
-        "start_times"    : {},
-        "student_answers": {},
-        "set_name"       : set_info["name"] if set_info else "Quiz",
-        "quiz_date"      : now_str,
-        "total_q"        : len(questions),
-        "chat_id"        : chat_id,
-        "set_id"         : set_id,
-        "solo_uid"       : user.id,
-    }
-    ctx.chat_data["quiz"] = quiz
-
-    await query.message.edit_text(
-        f"🚀 *Solo Quiz शुरू!*\n"
-        f"📚 {set_info['name']}\n"
-        f"❓ {len(questions)} सवाल\n"
-        f"👤 {user.first_name}\n\n"
-        f"_Saare sawaalon ke jawab dein — PDF milegi! 📄_",
-        parse_mode=ParseMode.MARKDOWN
-    )
-    asyncio.create_task(run_quiz(ctx.bot, chat_id, quiz))
-
-async def start_quiz_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Admin /sets, /startquiz, /manageset, /start (group/DM) se quiz start kare."""
-    query = update.callback_query
-    await query.answer()
-    if not is_admin(query.from_user.id):
-        await query.answer("Sirf admin quiz start kar sakte hain।", show_alert=True)
-        return
-    try:
-        set_id = int(query.data.split("_")[1])
-    except (IndexError, ValueError):
-        await query.message.reply_text("❌ Invalid set। Dobara try karein।")
-        return
-
-    questions = db.get_questions(set_id)
-    if not questions:
-        await query.message.reply_text("❌ Set mein koi sawaal nahi hai।")
-        return
-
-    chat     = query.message.chat
-    chat_id  = chat.id
-    is_group = chat.type in ("group", "supergroup")
-    is_dm    = chat.type == "private"
-
-    # ── DM mein admin ne set choose kiya ────────────────────────────────
-    # DM mein quiz nahi chalti — admin ko group mein jaake /startquiz karna hoga
-    # YA hum directly DM mein chala sakte hain (solo/practice mode)
-    # DECISION: DM mein chala do — PDF admin ko milegi
-    # ────────────────────────────────────────────────────────────────────
-
-    # Pehle se quiz chal rahi hai?
-    existing = ctx.chat_data.get("quiz")
-    if existing and existing.get("active") and not existing.get("finished"):
-        await query.message.reply_text(
-            "⚠️ Is chat mein pehle se ek quiz chal rahi hai!\n"
-            "Pehle /stopquiz karein।"
-        )
-        return
-
     set_info = db.get_set(set_id)
     now_str  = datetime.now().strftime("%d %b %Y, %I:%M %p IST")
     quiz = {
@@ -1628,12 +1635,63 @@ async def start_quiz_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "set_id"         : set_id,
     }
     ctx.chat_data["quiz"] = quiz
+    await query.message.edit_text(
+        f"🚀 *Quiz शुरू!*\n"
+        f"📚 {set_info['name'] if set_info else ''}\n"
+        f"❓ {len(questions)} सवाल",
+        parse_mode=ParseMode.MARKDOWN
+    )
+    asyncio.create_task(run_quiz(ctx.bot, chat_id, quiz))
 
-    # Group mein: students ko DM karne ka button do
+async def start_quiz_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Admin /sets, /startquiz, /manageset ya /start (group) se quiz start kare."""
+    query = update.callback_query
+    if not is_admin(query.from_user.id):
+        await query.answer("Sirf admin quiz start kar sakte hain।", show_alert=True)
+        return
+    await query.answer()
+    try:
+        set_id = int(query.data.split("_")[1])
+    except (IndexError, ValueError):
+        await query.message.reply_text("❌ Invalid set। Dobara try karein।")
+        return
+    chat_id   = query.message.chat_id
+    questions = db.get_questions(set_id)
+    if not questions:
+        await query.message.reply_text("❌ Set mein koi sawaal nahi hai।")
+        return
+
+    # Agar pehle se quiz chal rahi hai
+    existing = ctx.chat_data.get("quiz")
+    if existing and existing.get("active") and not existing.get("finished"):
+        await query.message.reply_text("⚠️ Is chat mein pehle se quiz chal rahi hai! Pehle /stopquiz karein।")
+        return
+
+    set_info = db.get_set(set_id)
+    now_str  = datetime.now().strftime("%d %b %Y, %I:%M %p IST")
+    quiz = {
+        "questions"      : questions,
+        "scores"         : {},
+        "active"         : True,
+        "finished"       : False,
+        "poll_map"       : {},
+        "start_times"    : {},
+        "student_answers": {},
+        "set_name"       : set_info["name"] if set_info else "Quiz",
+        "quiz_date"      : now_str,
+        "total_q"        : len(questions),
+        "chat_id"        : chat_id,
+        "set_id"         : set_id,   # SECTIONAL: section leaderboard ke liye
+    }
+    ctx.chat_data["quiz"] = quiz
+
+    # Group mein student join button dikhao
+    chat = query.message.chat
+    is_group = chat.type in ("group", "supergroup")
     join_kb  = None
     join_msg = ""
     if is_group:
-        join_msg = "\n\n👥 *Students:* Neeche button dabao, bot DM karo — phir wapas aao!"
+        join_msg = "\n\n👥 *Students:* Neeche button dabao, bot DM karo, wapas aao!"
         try:
             bot_info = await ctx.bot.get_me()
             join_kb  = InlineKeyboardMarkup([[InlineKeyboardButton(
@@ -1642,8 +1700,6 @@ async def start_quiz_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             )]])
         except Exception:
             pass
-    elif is_dm:
-        join_msg = "\n\n_DM mein practice quiz — PDF aapko milegi!_"
 
     await query.message.reply_text(
         f"🚀 *Quiz शुरू!*\n"
@@ -1712,27 +1768,10 @@ async def handle_poll_answer(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chosen = answer.option_ids[0] if answer.option_ids else None
     if chosen is None:
         return  # User ne retract kiya
-
-    correct = q["correct"]
-
-    # Auto-register karo agar pehle nahi hua (group students ke liye)
-    db.register_user(uid, name, None)
-
-    # Score entry banao ya naam update karo
+    correct= q["correct"]
     if uid not in quiz["scores"]:
-        quiz["scores"][uid] = {
-            "name": name, "score": 0,
-            "correct": 0, "wrong": 0,
-            "time": 0.0, "answered": 0
-        }
+        quiz["scores"][uid] = {"name":name,"score":0,"correct":0,"wrong":0,"time":0.0,"answered":0}
     e = quiz["scores"][uid]
-    e["name"] = name  # naam hamesha fresh rakho
-
-    # Duplicate answer guard — ek poll ka answer ek baar hi count ho
-    already = quiz.get("student_answers", {}).get(uid, {})
-    if idx in already:
-        return
-
     is_correct = (chosen == correct)
     if is_correct:
         e["score"]   += 1
@@ -1741,7 +1780,6 @@ async def handle_poll_answer(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         e["wrong"] += 1
     e["time"]     += taken
     e["answered"] += 1
-
     if uid not in quiz["student_answers"]:
         quiz["student_answers"][uid] = {}
     quiz["student_answers"][uid][idx] = chosen
@@ -1816,7 +1854,7 @@ async def finish_quiz(bot, chat_id: int, quiz: dict):
             acc     = calc_acc(s["correct"], s["answered"])
             std_ans = quiz.get("student_answers", {}).get(uid, {})
             pdf_buf = generate_result_pdf(
-                quiz_title=set_name, quiz_day=BOT_NAME,
+                quiz_title=set_name, quiz_day=BOT_USER,
                 quiz_date=now_str, total_questions=total_q,
                 scoring="+1 / -0", leaderboard=lb_for_pdf,
                 questions=questions, student_answers=std_ans,
@@ -1836,41 +1874,13 @@ async def finish_quiz(bot, chat_id: int, quiz: dict):
             sent += 1
             await asyncio.sleep(0.05)
         except TelegramError as e:
-            err = str(e).lower()
-            if "bot was blocked" in err:
-                reason = "bot blocked hai — DM mein /start karein"
-            elif "chat not found" in err or "user not found" in err:
-                reason = "bot ko pehle DM mein /start karein"
-            elif "deactivated" in err:
-                reason = "account deactivated"
-            else:
-                reason = str(e)[:40]
-            logger.warning(f"PDF failed {s['name']} ({uid}): {e}")
-            failed.append((s["name"], reason))
-        except Exception as e:
-            logger.error(f"PDF generate error {s['name']}: {e}")
-            failed.append((s["name"], "PDF generate error"))
+            logger.warning(f"PDF failed {s['name']}: {e}")
+            failed.append(s["name"])
 
     msg = f"✅ *{sent}/{total_students} students को PDF मिली!*"
     if failed:
-        try:
-            bot_info = await bot.get_me()
-            join_url = f"https://t.me/{bot_info.username}?start=grp"
-        except Exception:
-            join_url = None
-        msg += "\n\n⚠️ *इन्हें PDF नहीं मिली:*\n"
-        for item in failed[:15]:
-            if isinstance(item, tuple):
-                name, reason = item
-                msg += f"• {name} — _{reason}_\n"
-            else:
-                msg += f"• {item}\n"
-        if join_url:
-            msg += f"\n👆 Bot DM link: {join_url}"
-    try:
-        await bot.send_message(chat_id, msg, parse_mode=ParseMode.MARKDOWN)
-    except Exception:
-        await bot.send_message(chat_id, msg)
+        msg += f"\n\n⚠️ *इन्हें नहीं मिली* (/start करें):\n" + "\n".join(f"• {n}" for n in failed[:15])
+    await bot.send_message(chat_id, msg, parse_mode=ParseMode.MARKDOWN)
     db.save_leaderboard(chat_id, sorted_scores, set_info=db.get_set(quiz.get("set_id",0)))
     db.cleanup_old_answers()
     for pid in list(POLL_TO_CHAT.keys()):
@@ -1922,14 +1932,9 @@ async def leaderboard_show(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     data    = query.data
     medals  = ["🥇","🥈","🥉"]
 
-    is_dm = query.message.chat.type == "private"
     if data == "lb_overall":
-        if is_dm:
-            rows  = db.get_global_leaderboard(limit=20)
-            title = "🏆 Global Leaderboard"
-        else:
-            rows  = db.get_leaderboard(chat_id, limit=20, section_tag="overall")
-            title = "🏆 Overall Leaderboard"
+        rows  = db.get_leaderboard(chat_id, limit=20, section_tag="overall")
+        title = "🏆 Overall Leaderboard"
     elif data.startswith("lb_subj_"):
         subj_id = int(data.split("_")[2])
         subj    = db.get_subject(subj_id)
@@ -2379,7 +2384,7 @@ def build_app():
             ],
         },
         fallbacks=[_cancel_handler],
-        per_chat=False,
+        per_chat=True,
         per_message=False,
         allow_reentry=True,
     )
@@ -2388,7 +2393,7 @@ def build_app():
         entry_points=[CommandHandler("broadcast", broadcast_start)],
         states={BROADCAST_MSG: [MessageHandler(filters.TEXT, broadcast_send)]},
         fallbacks=[CommandHandler("cancel", cancel_conv)],
-        per_chat=False,
+        per_chat=True,
         per_message=False,
     )
 
@@ -2399,23 +2404,26 @@ def build_app():
             SCHEDULE_TIME: [MessageHandler(filters.TEXT, schedule_time_set)],
         },
         fallbacks=[CommandHandler("cancel", cancel_conv)],
-        per_chat=False,
+        per_chat=True,
         per_message=False,
     )
 
     rename_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(rename_set_cb, pattern=r"^renameset_")],
-        states={RENAME_SET: [MessageHandler(filters.TEXT, rename_set_done)]},
+        states={RENAME_SET: [MessageHandler(filters.TEXT & ~filters.COMMAND, rename_set_done)]},
         fallbacks=[CommandHandler("cancel", cancel_conv)],
-        per_chat=False,
+        per_chat=True,
         per_message=False,
     )
 
     settimer_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(settimer_cb, pattern=r"^settimer_")],
         states={SET_TIMER_VAL: [CallbackQueryHandler(settimer_done, pattern=r"^timer_")]},
-        fallbacks=[CommandHandler("cancel", cancel_conv)],
-        per_chat=False,
+        fallbacks=[
+            CommandHandler("cancel", cancel_conv),
+            CallbackQueryHandler(cancel_conv, pattern=r"^cancel_conv$"),
+        ],
+        per_chat=True,
         per_message=False,
     )
 
@@ -2423,6 +2431,7 @@ def build_app():
     app.add_handler(CommandHandler("start",       start))
     app.add_handler(CommandHandler("help",        help_cmd))
     app.add_handler(CommandHandler("sets",        list_sets))
+    app.add_handler(CommandHandler("newset",      newset_cmd))
     app.add_handler(CommandHandler("startquiz",   startquiz_cmd))
     app.add_handler(CommandHandler("stopquiz",    stop_quiz))
     app.add_handler(CommandHandler("leaderboard", leaderboard_cmd))
@@ -2447,7 +2456,7 @@ def build_app():
             SEC_SUBJECT_EMOJI: [MessageHandler(filters.TEXT, subject_emoji_recv)],
         },
         fallbacks=[CommandHandler("cancel", cancel_conv)],
-        per_chat=False,
+        per_chat=True,
         per_message=False,
     )
     topic_conv = ConversationHandler(
@@ -2456,7 +2465,7 @@ def build_app():
             SEC_TOPIC_NAME: [MessageHandler(filters.TEXT, topic_name_recv)],
         },
         fallbacks=[CommandHandler("cancel", cancel_conv)],
-        per_chat=False,
+        per_chat=True,
         per_message=False,
     )
 
@@ -2472,9 +2481,12 @@ def build_app():
     app.add_handler(CallbackQueryHandler(start_quiz_callback,  pattern=r"^startset_"))
     app.add_handler(CallbackQueryHandler(manage_set_chosen,    pattern=r"^mgset_"))
     app.add_handler(CallbackQueryHandler(mgaddq_callback,      pattern=r"^mgaddq_"))
-    app.add_handler(CallbackQueryHandler(sets_addq_callback,   pattern=r"^sets_addq"))
+    app.add_handler(CallbackQueryHandler(sets_newset_callback,  pattern=r"^sets_newset$"))
+    app.add_handler(CallbackQueryHandler(sets_addq_callback,    pattern=r"^sets_addq"))
+    app.add_handler(CallbackQueryHandler(newset_done_callback,  pattern=r"^newset_done_"))
     app.add_handler(CallbackQueryHandler(shuffle_set_cb,       pattern=r"^shuffle_"))
-    app.add_handler(CallbackQueryHandler(delete_set_cb,        pattern=r"^delset_"))
+    app.add_handler(CallbackQueryHandler(delete_set_confirm_cb, pattern=r"^delset_confirm_"))
+    app.add_handler(CallbackQueryHandler(delete_set_cb,          pattern=r"^delset_(?!confirm)"))
     app.add_handler(CallbackQueryHandler(delete_schedule_cb,   pattern=r"^delsched_"))
 
     # ✅ /addquestion — preset set selector (start mein)
@@ -2484,8 +2496,8 @@ def build_app():
     # 📋 Forwarded poll set selector
     app.add_handler(CallbackQueryHandler(fwdset_callback, pattern=r"^fwdset_"))
 
-    # Forwarded poll (new — with set selector)
-    app.add_handler(MessageHandler(filters.FORWARDED, handle_forwarded_poll_new))
+    # Forwarded poll — group=1
+    app.add_handler(MessageHandler(filters.FORWARDED, handle_forwarded_poll_new), group=1)
 
     # SECTIONAL handlers
     app.add_handler(CommandHandler("subjects",   subjects_cmd))
@@ -2493,9 +2505,9 @@ def build_app():
     app.add_handler(CommandHandler("setsection", setsection_cmd))
     app.add_handler(CommandHandler("slb",        sectional_leaderboard_cmd))
     app.add_handler(CallbackQueryHandler(lb_back_callback,   pattern=r"^lb_back$"))
-    app.add_handler(CallbackQueryHandler(leaderboard_show,    pattern=r"^lb_"))
-    app.add_handler(CallbackQueryHandler(new_subject_callback,pattern=r"^newsubject"))
-    app.add_handler(CallbackQueryHandler(addtopic_callback,   pattern=r"^addtopic_"))
+    app.add_handler(CallbackQueryHandler(leaderboard_show,    pattern=r"^lb_subj_|^lb_topic_|^lb_overall"))
+    # newsubject aur addtopic_ ConversationHandler mein already registered hain
+    # Duplicate top-level registration removed
     app.add_handler(CallbackQueryHandler(del_subject_callback,pattern=r"^delsubj_"))
     app.add_handler(CallbackQueryHandler(secset_callback,     pattern=r"^secset_"))
     app.add_handler(CallbackQueryHandler(secsubj_callback,    pattern=r"^secsubj_"))
@@ -2508,12 +2520,28 @@ def build_app():
     app.add_handler(CommandHandler("addquestion", addquestion_start))
     app.add_handler(CommandHandler("done",        addquestion_done))
 
-    # ✅ Text handler for /addquestion mode (set-name input + ✅ detection)
-    # Must be AFTER ConversationHandlers so they take priority
+    # ✅ Text handler — group=1 mein taaki ConversationHandlers (group=0) pehle chalein
     app.add_handler(MessageHandler(
         filters.TEXT & ~filters.COMMAND,
         handle_aq_text
-    ))
+    ), group=1)
+
+    # ── Global error handler ──────────────────────────────────────────────────
+    async def global_error_handler(update, context):
+        import traceback
+        err = context.error
+        logger.error(f"Update {update} caused error: {err}")
+        logger.error(traceback.format_exc())
+        # Agar callback query hai toh answer karo (button spinning band karo)
+        if update and hasattr(update, "callback_query") and update.callback_query:
+            try:
+                await update.callback_query.answer(
+                    "❌ Kuch galat hua. Dobara try karein.", show_alert=True
+                )
+            except Exception:
+                pass
+
+    app.add_error_handler(global_error_handler)
 
     return app
 
