@@ -612,7 +612,7 @@ async def sets_addq_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         sets = db.get_all_sets()
     except Exception as e:
         logger.error(f"addquestion get_all_sets error: {e}")
-        await update.message.reply_text("❌ DB error. Bot restart karein.")
+        await update.message.reply_text(f"❌ DB error: {e}\n\nBot restart karein ya admin se contact karein.")
         return
     if sets:
         kb = _set_selector_kb("aqpreset")
@@ -902,7 +902,7 @@ async def addquestion_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         sets = db.get_all_sets()
     except Exception as e:
         logger.error(f"addquestion get_all_sets error: {e}")
-        await update.message.reply_text("❌ DB error. Bot restart karein.")
+        await update.message.reply_text(f"❌ DB error: {e}\n\nBot restart karein ya admin se contact karein.")
         return
     if sets:
         kb = _set_selector_kb("aqpreset")
@@ -1284,10 +1284,17 @@ async def _do_save_aq(msg, ctx, set_id: int):
     if not q or not opts:
         await msg.reply_text("\u26a0\ufe0f Question data missing. Dobara bhejein.")
         return
-    db.add_question(
-        set_id=set_id, question=q, options=opts,
-        correct=correct, explanation="", timer=20, photo_id=photo
-    )
+    try:
+        db.add_question(
+            set_id=set_id, question=q, options=opts,
+            correct=correct, explanation="", timer=20, photo_id=photo
+        )
+    except Exception as e:
+        logger.error(f"_do_save_aq DB error: {e}", exc_info=True)
+        await msg.reply_text(
+            "\u274c Save nahi hua! DB error aaya. Bot restart karein."
+        )
+        return
     set_info = db.get_set(set_id)
     labels   = ["A","B","C","D","E"]
     # Clear question data, keep aq_mode and preset_set for next question
@@ -1540,7 +1547,7 @@ async def list_sets(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         sets = db.get_all_sets()
     except Exception as e:
         logger.error(f"get_all_sets error: {e}")
-        await update.message.reply_text("❌ DB error. Bot restart karein.")
+        await update.message.reply_text(f"❌ DB error: {e}\n\nBot restart karein ya admin se contact karein.")
         return
     chat = update.effective_chat
     is_group = chat.type in ("group", "supergroup")
