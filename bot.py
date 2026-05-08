@@ -26,7 +26,6 @@ from config import (
     BOT_TOKEN, ADMIN_IDS, BOT_NAME,
     BOT_USER, TARGET_TXT, TIMERS,
 )
-MAX_QUESTIONS_PER_SET = 500  # FIX #1
 
 logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s",
@@ -284,7 +283,7 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 "/schedules — Scheduled quizzes\n\n"
                 "📊 *Stats:*\n"
                 "/leaderboard — Overall Rankings\n"
-            "/slb — Sectional Leaderboard\n"
+                "/slb — Sectional Leaderboard\n"
                 "/myrank — Apni rank\n"
                 "/stats — Bot stats\n"
             "/subjects — Subjects & Topics manage करें\n"
@@ -1073,6 +1072,8 @@ async def _handle_aq_inner(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ctx.user_data.get("aq_waiting_presetname") or
         ctx.user_data.get("aq_waiting_fwdsetname")
     )
+    # Note: aq_active sirf error messages ke liye use hota hai
+    # ✅ aur Q: format hamesha process hota hai admin ke liye
 
     # /newset naam wait
     if ctx.user_data.get("waiting_newset_name"):
@@ -1170,7 +1171,37 @@ async def _handle_aq_inner(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 )
             return
 
-    # ✅ wala message hamesha check karo (forwarded ho ya direct)
+    # ── Q: A: B: C: D: Ans: format — direct paste bhi support ──────────────
+    if re.search(r'^Q\s*:', text, re.MULTILINE | re.IGNORECASE) and \
+       re.search(r'^Ans\s*:', text, re.MULTILINE | re.IGNORECASE):
+        preset_set = ctx.user_data.get("aq_preset_set")
+        if not preset_set:
+            sets = db.get_all_sets()
+            ctx.user_data["aq_pending_bulk_text"] = text
+            if sets:
+                kb = _set_selector_kb("aqset")
+                await update.message.reply_text(
+                    "\U0001f4c2 *Kis Set mein save karein?*",
+                    reply_markup=kb,
+                    parse_mode=ParseMode.MARKDOWN
+                )
+            else:
+                ctx.user_data["aq_waiting_setname"] = True
+                await update.message.reply_text(
+                    "\U0001f4dd Naye Set ka naam type karein:"
+                )
+            return
+        count, errors = _parse_and_save_txt(text, preset_set)
+        set_info = db.get_set(preset_set)
+        sname = set_info["name"] if set_info else str(preset_set)
+        await update.message.reply_text(
+            f"\u2705 *{count} questions save ho gaye!*\n\U0001f4c2 Set: *{sname}*"
+            + (f"\n\u274c {errors} errors the" if errors else ""),
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+
+    # ── ✅ wala message hamesha check karo (forwarded ho ya direct) ──────────
     if "\u2705" not in text:
         return
     parsed = parse_checkmark_question(text)
@@ -1273,7 +1304,24 @@ async def aqset_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ctx.user_data["aq_waiting_setname"] = True
         await query.message.edit_text("📝 नए Set का नाम टाइप करें:")
         return
-    set_id = int(data.split("_")[1])
+    try:
+        set_id = int(data.split("_")[1])
+    except (IndexError, ValueError):
+        await query.message.edit_text("\u274c Invalid selection.")
+        return
+    ctx.user_data["aq_preset_set"] = set_id
+    # Agar pending bulk text tha toh seedha save karo
+    pending = ctx.user_data.pop("aq_pending_bulk_text", None)
+    if pending:
+        count, errors = _parse_and_save_txt(pending, set_id)
+        set_info = db.get_set(set_id)
+        sname = set_info["name"] if set_info else str(set_id)
+        await query.message.edit_text(
+            f"\u2705 *{count} questions save ho gaye!*\n\U0001f4c2 Set: *{sname}*"
+            + (f"\n\u274c {errors} errors the" if errors else ""),
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
     await _do_save_aq(query.message, ctx, set_id)
 
 async def _do_save_aq(msg, ctx, set_id: int):
@@ -1880,7 +1928,7 @@ async def finish_quiz(bot, chat_id: int, quiz: dict):
             )
             sent += 1
             await asyncio.sleep(0.05)
-        except TelegramError as e:
+        except Exception as e:
             logger.warning(f"PDF failed {s['name']}: {e}")
             failed.append(s["name"])
 
