@@ -894,6 +894,31 @@ async def _save_question(msg, ctx, set_id: int):
 
 # ── /addquestion — ✅-marked question se auto save ───────────────────────────
 
+async def addquestion_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """/addquestion — auto mode: ✅ ya Q: dono format detect karo."""
+    if not is_admin(update.effective_user.id):
+        return
+    ctx.user_data.clear()
+    ctx.user_data["aq_mode"] = True
+    sets = db.get_all_sets()
+    if sets:
+        kb = _set_selector_kb("aqpreset")
+        await update.message.reply_text(
+            "📌 *Auto-Save Mode*\n\n"
+            "Pehle set chunein, phir questions bhejein:\n"
+            "• ✅ checkmark format\n"
+            "• Q: A: B: Ans: format\n"
+            "• Bulk (multiple questions)\n\n"
+            "_/done — khatam karein_",
+            reply_markup=kb,
+            parse_mode=ParseMode.MARKDOWN
+        )
+    else:
+        ctx.user_data["aq_waiting_presetname"] = True
+        await update.message.reply_text(
+            "📝 Pehle Set ka naam type karein:"
+        )
+
 async def addq_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """/addq — ✅ wala format se question add karo."""
     if not is_admin(update.effective_user.id):
