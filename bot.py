@@ -271,11 +271,15 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 f"🎯 *{BOT_NAME} — Admin Panel*\n\n"
                 "🔧 *Set Management:*\n"
                 "/sets — Sets dekhein aur quiz shuru karein\n"
-                "/addquestion — ✅ wale questions add karein\n"
-                "/manageset — Set rename/delete/shuffle\n"
-                "/newquiz — Manually question add karein\n"
-                "/bulkupload — Excel upload\n"
-                "/txtupload — TXT file upload\n\n"
+                "/newset — Naya set banao\n\n"
+                "➕ *Questions Add:*\n"
+                "/addq — ✅ Checkmark format\n"
+                "/addtxt — Q: A: B: Ans: format\n"
+                "/addbulk — Ek saath bahut saare questions\n"
+                "/addquestion — Auto detect (dono format)\n"
+                "/newquiz — Manual ek ek question\n"
+                "/bulkupload — Excel file\n"
+                "/txtupload — TXT file\n\n"
                 "🚀 *Quiz:*\n"
                 "/startquiz — Quiz shuru karein\n"
                 "/stopquiz — Quiz rokein\n"
@@ -890,7 +894,88 @@ async def _save_question(msg, ctx, set_id: int):
 
 # ── /addquestion — ✅-marked question se auto save ───────────────────────────
 
-async def addquestion_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+async def addq_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """/addq — ✅ wala format se question add karo."""
+    if not is_admin(update.effective_user.id):
+        return
+    ctx.user_data.clear()
+    ctx.user_data["aq_mode"] = True
+    sets = db.get_all_sets()
+    if sets:
+        kb = _set_selector_kb("aqpreset")
+        await update.message.reply_text(
+            "📌 *✅ Format — Question Add*\n\n"
+            "Pehle set chunein:",
+            reply_markup=kb,
+            parse_mode=ParseMode.MARKDOWN
+        )
+    else:
+        ctx.user_data["aq_waiting_presetname"] = True
+        await update.message.reply_text(
+            "📝 Pehle Set ka naam type karein:"
+        )
+
+async def addtxt_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """/addtxt — Q: A: B: C: D: Ans: format se question add karo."""
+    if not is_admin(update.effective_user.id):
+        return
+    ctx.user_data.clear()
+    ctx.user_data["aq_mode"] = True
+    sets = db.get_all_sets()
+    if sets:
+        kb = _set_selector_kb("aqpreset")
+        await update.message.reply_text(
+            "📋 *Q: Format — Question Add*\n\n"
+            "Pehle set chunein, phir neeche format mein question bhejein:\n\n"
+            "`Q: सवाल?\n"
+            "A: Option 1\n"
+            "B: Option 2\n"
+            "C: Option 3\n"
+            "D: Option 4\n"
+            "Ans: B\n"
+            "Exp: Explanation`",
+            reply_markup=kb,
+            parse_mode=ParseMode.MARKDOWN
+        )
+    else:
+        ctx.user_data["aq_waiting_presetname"] = True
+        await update.message.reply_text(
+            "📝 Pehle Set ka naam type karein:"
+        )
+
+async def addbulk_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """/addbulk — Ek saath bahut saare Q: format questions paste karo."""
+    if not is_admin(update.effective_user.id):
+        return
+    ctx.user_data.clear()
+    ctx.user_data["aq_mode"] = True
+    sets = db.get_all_sets()
+    if sets:
+        kb = _set_selector_kb("aqpreset")
+        await update.message.reply_text(
+            "📦 *Bulk Questions Add*\n\n"
+            "Pehle set chunein, phir saare questions ek saath paste karein:\n\n"
+            "`Q: पहला सवाल?\n"
+            "A: Option 1\n"
+            "B: Option 2\n"
+            "C: Option 3\n"
+            "D: Option 4\n"
+            "Ans: B\n"
+            "Q: दूसरा सवाल?\n"
+            "A: ...\n"
+            "Ans: A`\n\n"
+            "_Blank line ya seedha Q: se agla question shuru karein।_\n"
+            "_Jitne chahein utne questions ek baar mein paste karein।_",
+            reply_markup=kb,
+            parse_mode=ParseMode.MARKDOWN
+        )
+    else:
+        ctx.user_data["aq_waiting_presetname"] = True
+        await update.message.reply_text(
+            "📝 Pehle Set ka naam type karein:"
+        )
+
+
     """Admin /addquestion bheje → pehle set choose karo, phir ✅ wala question bhejo."""
     if not is_admin(update.effective_user.id):
         return
@@ -1006,14 +1091,19 @@ def _parse_and_save_txt(content: str, set_id: int) -> tuple:
     Parse entire TXT content and save to DB.
     Returns (count, errors).
     Supports:
-    - Multiple questions separated by blank line
+    - Multiple questions separated by blank line OR directly next Q:
     - Multiline Q and Exp
     - Windows/Linux line endings
     - Zero-width chars
     """
     content = _clean_txt(content)
-    # Split by blank lines (double newline)
-    blocks  = re.split(r'\n{2,}', content)
+    # Split by blank lines OR by line starting with Q:
+    # Pehle blank-line split try karo, phir Q: boundary split
+    if re.search(r'\n{2,}', content):
+        blocks = re.split(r'\n{2,}', content)
+    else:
+        # No blank lines — split on Q: boundaries
+        blocks = re.split(r'\n(?=Q\s*:)', content, flags=re.IGNORECASE)
     count, errors = 0, 0
 
     for block in blocks:
@@ -1117,61 +1207,11 @@ async def _handle_aq_inner(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if not text.strip():
         return
+    # Commands ignore karo (/, /cancel, /done etc)
+    if text.strip().startswith('/'):
+        return
 
-    # Check Q: A: B: C: D: Ans: format
-    has_q_format = bool(
-        re.search(r'^Q\s*:', text, re.MULTILINE | re.IGNORECASE) and
-        re.search(r'^ANS\s*:', text, re.MULTILINE | re.IGNORECASE)
-    )
-
-    if has_q_format:
-        # Q: format detect hua — parse karo
-        parsed_q = _parse_qa_format(text)
-        if parsed_q:
-            ctx.user_data["aq_q"]       = parsed_q["question"]
-            ctx.user_data["aq_opts"]    = parsed_q["options"]
-            ctx.user_data["aq_correct"] = parsed_q["correct"]
-            ctx.user_data["aq_photo"]   = None
-            preset_set = ctx.user_data.get("aq_preset_set")
-            if preset_set:
-                await _do_save_aq(update.message, ctx, preset_set)
-            else:
-                sets = db.get_all_sets()
-                labels = ["A","B","C","D"]
-                opts_preview = "\n".join(
-                    f"{'✅' if i==parsed_q['correct'] else '➖'} {labels[i]}: {o}"
-                    for i, o in enumerate(parsed_q["options"])
-                )
-                if sets:
-                    kb = _set_selector_kb("aqset")
-                    await update.message.reply_text(
-                        f"✅ *Question detect हुआ!*\n\n"
-                        f"❓ {parsed_q['question']}\n\n"
-                        f"{opts_preview}\n\n"
-                        f"📂 *किस Set में save करें?*",
-                        reply_markup=kb,
-                        parse_mode=ParseMode.MARKDOWN
-                    )
-                else:
-                    ctx.user_data["aq_waiting_setname"] = True
-                    await update.message.reply_text(
-                        f"✅ *Question detect हुआ!*\n\n"
-                        f"❓ {parsed_q['question']}\n\n"
-                        f"{opts_preview}\n\n"
-                        f"📝 नए Set का नाम टाइप करें:",
-                        parse_mode=ParseMode.MARKDOWN
-                    )
-            return
-        else:
-            if aq_active:
-                await update.message.reply_text(
-                    "⚠️ Q: format detect नहीं हुआ।\n"
-                    "Example:\n`Q: सवाल?\nA: Option A\nB: Option B\n"
-                    "C: Option C\nD: Option D\nAns: B`"
-                )
-            return
-
-    # ── Q: A: B: C: D: Ans: format — direct paste bhi support ──────────────
+    # ── Q: A: B: C: D: Ans: format — single ya bulk dono support ──────────────
     if re.search(r'^Q\s*:', text, re.MULTILINE | re.IGNORECASE) and \
        re.search(r'^Ans\s*:', text, re.MULTILINE | re.IGNORECASE):
         preset_set = ctx.user_data.get("aq_preset_set")
@@ -1583,8 +1623,14 @@ async def handle_excel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             logger.warning(f"Row error: {e}")
             errors += 1
 
+    # Quiz start karne ka button do
+    start_kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton(f"▶️ Quiz Start karein", callback_data=f"startset_{set_id}")
+    ]])
     await update.message.reply_text(
-        f"✅ *Upload पूरा!*\n📂 {set_name}\n✔️ {count} सवाल | ❌ {errors} errors",
+        f"✅ *Upload पूरा!*\n📂 {set_name}\n✔️ {count} सवाल | ❌ {errors} errors\n\n"
+        f"Ab quiz shuru kar sakte hain:",
+        reply_markup=start_kb,
         parse_mode=ParseMode.MARKDOWN
     )
 
@@ -1755,6 +1801,18 @@ async def start_quiz_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             )]])
         except Exception:
             pass
+
+    # DM mein Telegram quiz polls kaam nahi karte — group mein bhejo
+    if not is_group:
+        await query.message.reply_text(
+            f"⚠️ *Quiz sirf Group mein start hoti hai!*\n\n"
+            f"📚 Set: *{set_info['name']}* ready hai ({len(questions)} sawaal)\n\n"
+            f"1️⃣ Apne group mein jaayein\n"
+            f"2️⃣ /startquiz command karein aur set chunein\n"
+            f"3️⃣ Quiz shuru ho jaayegi!",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
 
     await query.message.reply_text(
         f"🚀 *Quiz शुरू!*\n"
@@ -2120,10 +2178,13 @@ async def _set_bot_commands(bot):
         BotCommand("sets",        "📚 Sets + Quiz start"),
         BotCommand("startquiz",   "🚀 Quiz shuru karein"),
         BotCommand("stopquiz",    "⏹ Quiz rokein"),
-        BotCommand("addquestion", "✅ Questions add karein"),
+        BotCommand("addquestion", "➕ Auto mode — ✅ ya Q: format"),
+        BotCommand("addq",        "✅ Checkmark format"),
+        BotCommand("addtxt",      "📋 Q: A: B: Ans: format"),
+        BotCommand("addbulk",     "📦 Bulk — bahut saare questions"),
         BotCommand("newquiz",     "📝 Manual question"),
         BotCommand("bulkupload",  "📊 Excel upload"),
-        BotCommand("txtupload",   "📄 TXT upload"),
+        BotCommand("txtupload",   "📄 TXT file upload"),
         BotCommand("manageset",   "🔧 Set manage"),
         BotCommand("schedule",    "⏰ Quiz schedule"),
         BotCommand("schedules",   "📅 Scheduled quizzes"),
@@ -2573,6 +2634,9 @@ def build_app():
 
     # /addquestion + /done commands
     app.add_handler(CommandHandler("addquestion", addquestion_start))
+    app.add_handler(CommandHandler("addq",        addq_cmd))
+    app.add_handler(CommandHandler("addtxt",      addtxt_cmd))
+    app.add_handler(CommandHandler("addbulk",     addbulk_cmd))
     app.add_handler(CommandHandler("done",        addquestion_done))
 
     # ✅ Text handler — group=1 mein taaki ConversationHandlers (group=0) pehle chalein
