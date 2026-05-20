@@ -21,7 +21,7 @@ from telegram.constants import ParseMode
 from telegram.error import TelegramError
 
 import database as db
-from pdf_generator import generate_result_pdf
+from pdf_generator import generate_result_pdf, generate_result_pdf_async
 from config import (
     BOT_TOKEN, ADMIN_IDS, BOT_NAME,
     BOT_USER, TARGET_TXT, TIMERS,
@@ -1991,7 +1991,7 @@ async def finish_quiz(bot, chat_id: int, quiz: dict):
         try:
             acc     = calc_acc(s["correct"], s["answered"])
             std_ans = quiz.get("student_answers", {}).get(uid, {})
-            pdf_buf = generate_result_pdf(
+            pdf_buf = await generate_result_pdf_async(
                 quiz_title=set_name, quiz_day=BOT_USER,
                 quiz_date=now_str, total_questions=total_q,
                 scoring="+1 / -0", leaderboard=lb_for_pdf,
