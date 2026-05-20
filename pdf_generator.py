@@ -138,7 +138,7 @@ def generate_result_pdf(
 
         result = subprocess.run(
             [
-                'wkhtmltopdf',
+                '/usr/bin/wkhtmltopdf',
                 '--encoding', 'utf-8',
                 '--disable-javascript',
                 '--load-error-handling', 'ignore',
