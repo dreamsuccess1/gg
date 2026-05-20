@@ -383,19 +383,48 @@ def _section_tags(set_info: dict) -> list:
 def save_leaderboard(chat_id: int, sorted_scores: list, set_info: dict = None):
     c    = _conn()
     tags = _section_tags(set_info)
+    # Ensure UNIQUE constraint exists (for old DBs)
+    try:
+        c.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS
+            idx_lb_unique ON leaderboard(chat_id, user_id, section_tag)
+        """)
+        c.commit()
+    except Exception:
+        pass
     for uid, s in sorted_scores:
         for tag in tags:
-            c.execute("""
-                INSERT INTO leaderboard(chat_id,user_id,name,score,correct,wrong,quizzes,section_tag)
-                VALUES(?,?,?,?,?,?,1,?)
-                ON CONFLICT(chat_id,user_id,section_tag) DO UPDATE SET
-                    score  = score   + excluded.score,
-                    correct= correct + excluded.correct,
-                    wrong  = wrong   + excluded.wrong,
-                    quizzes= quizzes + 1,
-                    name   = excluded.name,
-                    ts     = datetime('now')
-            """, (chat_id, uid, s["name"], s["score"], s["correct"], s["wrong"], tag))
+            try:
+                # Try upsert first
+                c.execute("""
+                    INSERT INTO leaderboard(chat_id,user_id,name,score,correct,wrong,quizzes,section_tag)
+                    VALUES(?,?,?,?,?,?,1,?)
+                    ON CONFLICT(chat_id,user_id,section_tag) DO UPDATE SET
+                        score   = score   + excluded.score,
+                        correct = correct + excluded.correct,
+                        wrong   = wrong   + excluded.wrong,
+                        quizzes = quizzes + 1,
+                        name    = excluded.name,
+                        ts      = datetime('now')
+                """, (chat_id, uid, s["name"], s["score"], s["correct"], s["wrong"], tag))
+            except Exception:
+                # Fallback: manual update/insert
+                row = c.execute(
+                    "SELECT id FROM leaderboard WHERE chat_id=? AND user_id=? AND section_tag=?",
+                    (chat_id, uid, tag)
+                ).fetchone()
+                if row:
+                    c.execute("""
+                        UPDATE leaderboard SET
+                            score=score+?, correct=correct+?, wrong=wrong+?,
+                            quizzes=quizzes+1, name=?, ts=datetime('now')
+                        WHERE chat_id=? AND user_id=? AND section_tag=?
+                    """, (s["score"], s["correct"], s["wrong"], s["name"], chat_id, uid, tag))
+                else:
+                    c.execute("""
+                        INSERT INTO leaderboard(chat_id,user_id,name,score,correct,wrong,quizzes,section_tag)
+                        VALUES(?,?,?,?,?,?,1,?)
+                    """, (chat_id, uid, s["name"], s["score"], s["correct"], s["wrong"], tag))
     c.commit()
 
 def get_leaderboard(chat_id: int, limit: int = 50,
